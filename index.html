@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>NOAA SatHack Dashboard</title>
+  <link rel="stylesheet" href="styles.css" />
+  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+</head>
+<body>
+
+  <!-- TOP BANNER -->
+  <div class="banner">Know before you go!</div>
+
+  <!-- SEARCH SECTION -->
+  <div class="search-container">
+    <p class="search-intro">Search for your county to know more</p>
+    <input type="text" id="search-input" placeholder="Enter CA county name" />
+    <button id="search-btn" disabled>Search</button>
+    <p id="result-text"></p>
+  </div>
+
+  <!-- TOP PANELS: BIG GIFs -->
+  <div class="top-container">
+    <div class="panel big">
+      <h2>Flash Counts</h2>
+      <img class="clickable" src="flash_hourly.gif" alt="Flash Counts" />
+    </div>
+    <div class="panel big">
+      <h2>Dry Strike Index</h2>
+      <img class="clickable" src="dsi_hourly.gif" alt="Dry Strike Index" />
+    </div>
+  </div>
+
+  <!-- PNG SECTION TITLE -->
+  <h3 class="section-title">Additional resources</h3>
+
+  <!-- BOTTOM SLIDER: SMALLER PNGs -->
+  <div class="bottom-slider" aria-hidden="false">
+    <div class="slider-track">
+      <img class="clickable" src="California-County.jpg" alt="" />
+      <img class="clickable" src="LULC_California.jpg" alt="" />
+      <img class="clickable" src="flammability_map_cwr.png" alt="" />
+      <img class="clickable" src="pre_fire.png" alt="" />
+      <img class="clickable" src="post_fire.png" alt="" />
+    </div>
+  </div>
+
+  <!-- FULLSCREEN LIGHTBOX -->
+  <div id="modal" class="modal" role="dialog" aria-modal="true" aria-hidden="true">
+    <img id="modal-img" src="" alt="Enlarged view" />
+  </div>
+
+  <script>
+  window.addEventListener('DOMContentLoaded', () => {
+    // File mapping (must reside alongside index.html)
+    const files = {
+      dsi:   './CA_county_DSI_summary.xlsx',
+      flash: './CA_county_flash_counts.xlsx',
+      pre:   './prefire_nbr.xlsx',
+      post:  './postfire_nbr.xlsx'
+    };
+
+    const data = { dsi:{}, flash:{}, pre:{}, post:{} };
+
+    // Normalize county names: trim, lowercase, strip trailing "county", collapse spaces
+    function normalizeCounty(name) {
+      return String(name || '')
+        .trim()
+        .toLowerCase()
+        .replace(/\s*county$/, '')
+        .replace(/\s+/g, ' ');
+    }
+
+    // Generic loader: detect county column (header containing "name") and value column by hint
+    async function loadSheet(url, dictKey, valueHint) {
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error(`Failed to load ${url}: ${resp.status}`);
+      const buf = await resp.arrayBuffer();
+      const wb  = XLSX.read(buf, { type: 'array' });
+      const sheet = wb.Sheets[wb.SheetNames[0]];
+      const rows  = XLSX.utils.sheet_to_json(sheet, { defval: '' });
+
+      if (!rows.length) {
+        console.warn(`No rows in ${url}`);
+        return;
+      }
+
+      const headers = Object.keys(rows[0]);
+      const countyCol = headers.find(h => /name/i.test(h));
+      const valueCol  = headers.find(h => new RegExp(valueHint, 'i').test(h)) || headers.find(h => /value|val|nbr|dsi|count|counts|flash/i.test(h));
+
+      if (!countyCol) {
+        console.warn(`No county column detected in ${url}. Headers:`, headers);
+        return;
+      }
+      if (!valueCol) {
+        console.warn(`No value column detected in ${url}. Headers:`, headers);
+        return;
+      }
+
+      rows.forEach(r => {
+        const rawName = r[countyCol];
+        const key = normalizeCounty(rawName);
+        const val = r[valueCol];
+        data[dictKey][key] = val;
+      });
+
+      console.log(`Loaded ${Object.keys(data[dictKey]).length} rows from ${url}`);
+    }
+
+    // Load all sheets in parallel
+    Promise.all([
+      loadSheet(files.dsi,   'dsi',   'DSI'),
+      loadSheet(files.flash, 'flash', 'flash'),
+      loadSheet(files.pre,   'pre',   'nbr'),
+      loadSheet(files.post,  'post',  'nbr')
+    ])
+    .then(() => {
+      document.getElementById('search-btn').disabled = false;
+    })
+    .catch(err => {
+      console.error('Error loading Excel files:', err);
+      const out = document.getElementById('result-text');
+      out.textContent = '⚠️ Could not load one or more data files. See console for details.';
+      document.getElementById('search-btn').disabled = false;
+    });
+
+    // Classify DSI risk
+    function riskCategory(v) {
+      return v <= 0    ? 'no'
+           : v <= 1.0  ? 'low'
+           : v <= 5.0  ? 'moderate'
+           :             'strong';
+    }
+
+    // Search handler
+    function doSearch() {
+      const rawInput = document.getElementById('search-input').value;
+      const key = normalizeCounty(rawInput);
+      const outEl = document.getElementById('result-text');
+
+      const dsiPresent = (data.dsi[key] !== undefined && data.dsi[key] !== null && String(data.dsi[key]).trim() !== '');
+      if (!dsiPresent) {
+        outEl.textContent = 'County not found. Please check your spelling.';
+        return;
+      }
+
+      function getVal(dict) {
+        const v = dict[key];
+        return (v === '' || v === null || v === undefined) ? 'N/A' : v;
+      }
+
+      const flashes = getVal(data.flash);
+      const dsiValRaw = getVal(data.dsi);
+      const dsiVal = parseFloat(dsiValRaw);
+      const dsiNum = isNaN(dsiVal) ? 0 : dsiVal;
+      const preNbr = getVal(data.pre);
+      const postNbr = getVal(data.post);
+      const risk = riskCategory(dsiNum);
+
+      const pretty = rawInput.trim().replace(/\b\w/g, c => c.toUpperCase());
+
+      outEl.textContent =
+        `${pretty} county had ${flashes} flashes, and had ${risk} potential for lightning induced fire. `
+        + `The pre-fire NBR was ${preNbr} and the post-fire NBR was ${postNbr}.`;
+    }
+
+    // Wire up Search button
+    document.getElementById('search-btn').addEventListener('click', doSearch);
+
+    // Allow Enter key in input to trigger search
+    document.getElementById('search-input').addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        document.getElementById('search-btn').click();
+      }
+    });
+
+    // LIGHTBOX: click any .clickable image to open, Esc or overlay click to close
+    const modal = document.getElementById('modal');
+    const modalImg = document.getElementById('modal-img');
+
+    function openModal(src) {
+      modalImg.src = src;
+      modal.style.display = 'flex';
+      modal.setAttribute('aria-hidden', 'false');
+    }
+    function closeModal() {
+      modal.style.display = 'none';
+      modalImg.src = '';
+      modal.setAttribute('aria-hidden', 'true');
+    }
+
+    document.querySelectorAll('img.clickable').forEach(img => {
+      img.addEventListener('click', () => openModal(img.src));
+    });
+
+    modal.addEventListener('click', closeModal);
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') closeModal();
+    });
+  });
+  </script>
+</body>
+</html>
